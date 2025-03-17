@@ -88,16 +88,26 @@ typedef struct {
 	char *content;
 } array_t;
 
+//
+// View acts like an array but does not "own" its memory.
+// It just looks at it - therefore, there is no `capacity` member.
+//
 typedef struct {
 	size_t count;
 	char *content;
 } view_t;
 
+//
+// Key - value data structure.
+//
 typedef struct {
 	view_t key;
 	int value;
 } keyval_t;
 
+//
+// Table data structure acts like a dynamic array of key - values.
+//
 typedef struct {
 	size_t count;
 	size_t capacity;
@@ -107,19 +117,22 @@ typedef struct {
 int view_comp(view_t a, view_t b) {
 	size_t m = a.count;
 	size_t n = b.count;
-	
+	//
+	// If the size of the views are not the same, they could not possibly be equal
+	//
 	if (m != n)
 		return 0;
-
 	for (size_t i = 0; i < n; i++)
 		if (a.content[i] != b.content[i])
 			return 0;
-
 	return 1;
 }
 
-const double table_load_factor = 0.75;
-const size_t table_scale_factor = 4;
+//
+// Default table parameters recommended by Deepseek
+//
+const double table_load_factor = 0.7;
+const size_t table_scale_factor = 2;
 
 double table_current_load(table_t table) {
 	return ((double)table.count) / ((double)table.capacity);
@@ -157,6 +170,38 @@ void table_insert(table_t *table, keyval_t bucket) {
 				//
 				// The hash collided.
 				// Collision resolution is currently accomplished via linear probing
+				//
+				index = (index + 1) % table->capacity; 
+		}
+	}
+}
+
+int *table_get(table_t *table, view_t key) {
+	//
+	// Compute the 32-bit hash of the key to get an index into the table
+	//
+	uint32_t hash = fnv1a_32((const uint8_t *)key.content, key.count);
+	uint32_t index = hash % table->capacity;
+	//
+	// Search for the value in the table
+	//
+	while (1) {
+		//
+		// If the value indexed is NULL at any point, then the value
+		// does not exist in the table. Return NULL in this case.
+		//
+		if (table->content[index].key.content == NULL) {
+			return NULL;
+		} else {
+			if (view_comp(table->content[index].key, key))
+				//
+				// The key exists and we have found it. Return the value.
+				//
+				return &table->content[index].value;
+			else
+				//
+				// The key may exist, but this is not the correct value.
+				// The hash has collided. Continue search by linearly probing.
 				//
 				index = (index + 1) % table->capacity; 
 		}
@@ -232,6 +277,29 @@ int table_expand(table_t *table) {
 	table->content = new_content;
 	return 0;
 }
+
+view_t cstring_to_view(const char *string) {
+	return (view_t){strlen(string), (char *)string};
+}
+
+keyval_t create_keyval_from_view(view_t key, int value) {
+	return (keyval_t){key, value};
+}
+
+keyval_t create_keyval_from_cstring(const char *key, int value) {
+	return (keyval_t){cstring_to_view(key), value};
+}
+
+//
+// Note: to expand the argument of this macro correctly for
+// printf, no outer parentesis should be placed around the
+// entire expression. For instance, 
+//
+//             (((int)((v).count)),((v).content))
+//
+// expands incorrectly. Neat!
+//
+#define VIEW_FMT(v) ((int)((v).count)),((v).content)
 
 int main(void) {
 	const char *filepath = "share/shakespeare.txt";
@@ -334,7 +402,7 @@ int main(void) {
 				// Insert the new value into the table if it
 				// does not already exist.
 				//
-				keyval_t bucket = {view, 1};
+				keyval_t bucket = create_keyval_from_view(view, (int)view.count);
 				table_insert(&table, bucket);
 				//
 				// Reset the view
@@ -352,6 +420,16 @@ int main(void) {
 				break;
 		}
 	}
+	//
+	// Test table indexing
+	//
+	view_t key = cstring_to_view("water");
+	int *value = table_get(&table, key);
+	if (value == NULL)
+		//printf("The key \"%.*s\" does not exist in the table\n", (int)key.count, key.content);
+		printf("The key \"%.*s\" does not exist in the table\n", VIEW_FMT(key));
+	else
+		printf("The key \"%.*s\" is associated with the value %d\n", VIEW_FMT(key), *value);
 	//
 	// Cleanup
 	//
