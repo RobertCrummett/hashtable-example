@@ -32,7 +32,7 @@ uint32_t fnv1a_32(const uint8_t *data, size_t length) {
 }
 
 const uint64_t fnv_prime_64 = 1099511628211;
-const uint64_t fnv_offset_basis_64 = 14695981039346656037;
+const uint64_t fnv_offset_basis_64 = 14695981039346656037ULL;
 
 uint64_t fnv1a_64(const uint8_t *data, size_t length) {
 	uint64_t h = fnv_offset_basis_64;
@@ -76,7 +76,7 @@ void prints32(char *str) {
 }
 
 void prints64(char *str) {
-	printf("hash of \"%s\" => 0x%zx\n", str, fnv1a_64((uint8_t *)str, strlen(str)));
+	printf("hash of \"%s\" => 0x%llx\n", str, fnv1a_64((uint8_t *)str, strlen(str)));
 }
 
 //
@@ -118,6 +118,121 @@ int view_comp(view_t a, view_t b) {
 	return 1;
 }
 
+const double table_load_factor = 0.75;
+const size_t table_scale_factor = 4;
+
+double table_current_load(table_t table) {
+	return ((double)table.count) / ((double)table.capacity);
+}
+
+int table_needs_to_expand(table_t table) {
+	return (table_current_load(table) > table_load_factor) ? 1 : 0;
+}
+
+void table_insert(table_t *table, keyval_t bucket) {
+	//
+	// Compute the 32-bit hash of the bucket's key to get
+	// an index into the table content
+	//
+	uint32_t hash = fnv1a_32((const uint8_t *)bucket.key.content, bucket.key.count);
+	uint32_t index = hash % table->capacity;
+	//
+	// Insert the bucket into the table
+	//
+	while (1) {
+		//
+		// Check if the bucket is space is available
+		//
+		if (table->content[index].key.content == NULL) {
+			table->content[index] = bucket;
+			table->count++;
+			break;
+		} else {
+			if (view_comp(table->content[index].key, bucket.key))
+				//
+				// The key is a duplicate. No need to do anything.
+				//
+				break;
+			else
+				//
+				// The hash collided.
+				// Collision resolution is currently accomplished via linear probing
+				//
+				index = (index + 1) % table->capacity; 
+		}
+	}
+}
+
+int table_expand(table_t *table) {
+	size_t new_capacity = table_scale_factor * table->capacity;
+	//
+	// Allocate memory for the new table. This storage will
+	// replace the tables current contents once the values inside
+	// the current storage are rehashed into this new table
+	//
+	// TODO:
+	// This can fail. I do not like that this can fail, but
+	// I do not like manually passing in auxillary memory even
+	// more. Is there another alterative to these two evils?
+	//
+	keyval_t *new_content = calloc(new_capacity, sizeof *new_content);
+	if (new_content == NULL) {
+		fprintf(stderr, "Failed to allocate new space during the table rehashing\n");
+		return 1;
+	}
+	//
+	// Linearly step through table and rehash each
+	// key value pair. Then place the rehashed key
+	// value pair into the new table space.
+	//
+	for (size_t j = 0; j < table->capacity; j++) {
+		keyval_t bucket = table->content[j];
+		//
+		// Test if the key exists
+		//
+		if (bucket.key.content != NULL) {
+			//
+			// Compute the 32-bit hash of the bucket's key to get
+			// an index into the content array
+			//
+			uint32_t hash = fnv1a_32((const uint8_t *)bucket.key.content, bucket.key.count);
+			uint32_t index = hash % new_capacity;
+			//
+			// Insert the bucket into the new content memory at the new index
+			//
+			while (1) {
+				//
+				// Check if the bucket is space is available
+				//
+				if (new_content[index].key.content == NULL) {
+					new_content[index] = bucket;
+					break;
+				} else {
+					if (view_comp(new_content[index].key, bucket.key))
+						//
+						// The key is a duplicate. No need to do anything.
+						//
+						break;
+					else
+						//
+						// The hash collided.
+						// Collision resolution is currently accomplished via linear probing
+						//
+						index = (index + 1) % table->capacity; 
+				}
+			}
+		}
+	}
+	//
+	// Remove the old table contents and replace
+	// the with the rehashed, expanded contents
+	//
+	free(table->content);
+	table->capacity = new_capacity;
+	table->content = new_content;
+	return 0;
+}
+
 int main(void) {
 	const char *filepath = "share/shakespeare.txt";
 	FILE *fin = fopen(filepath, "r");
@@ -141,7 +256,7 @@ int main(void) {
 			// The default array size
 			//
 			if (array.capacity == 0)
-				array.capacity = 8;
+				array.capacity = 512;
 			//
 			// The default array capacity
 			// increase rate
@@ -167,7 +282,7 @@ int main(void) {
 	// Display dynamic array contents as single words
 	//
 	view_t view = {0};
-	
+
 	const size_t table_default_size = 256;
 	table_t table = {
 		.count = 0,
@@ -182,12 +297,9 @@ int main(void) {
 		return 1;
 	}
 
-	const double table_load_factor = 0.75;
-	const size_t table_scale_factor = 2;
-
 	for (size_t i = 0; i < array.count; i++) {
 		char c = array.content[i];
-	
+
 		switch (c) {
 			//
 			// White space characters
@@ -204,83 +316,34 @@ int main(void) {
 				//
 				// Otherwise, put the view into the table
 				//
-
-				//
 				// If the tables current load factor is
 				// greater than some threshold `table_load_factor`,
 				// the table needs to be reallocated and rehashed
 				// before the enxt insertion.
 				//
-				printf("Table Load Factor: %lf\n", ((double)table.count) / table.capacity);
-				if (table_load_factor < ((double)table.count) / table.capacity) {
-					size_t new_capacity = table_scale_factor * table.capacity;
-					keyval_t *new_content = calloc(new_capacity, sizeof *new_content);
-					if (new_content == NULL) {
-						fprintf(stderr, "Failed to allocate new space during the table rehashing\n");
+				if (table_needs_to_expand(table)) {
+					int ret = table_expand(&table);
+					if (ret) {
+						fprintf(stderr, "Failed to expand the table\n");
 						free(array.content);
 						free(table.content);
 						return 1;
 					}
-
-					//
-					// Linearly step through table and rehash each
-					// key value pair. Then place the rehashed key
-					// value pair into the new table space.
-					//
-					for (size_t j = 0; j < table.capacity; j++) {
-						keyval_t bucket = table.content[j];
-						//
-						// Test if the key exists
-						//
-						if (bucket.key.content != NULL) {
-							uint32_t hash = fnv1a_32(bucket.key.content, bucket.key.count);
-							uint32_t index = hash % new_capacity;
-
-							new_content[index] = bucket;
-						}
-					}
-
-					//
-					// Remove the old table contents and replace
-					// the with the rehashed, expanded contents
-					//
-					free(table.content);
-
-					table.capacity = new_capacity;
-					table.content = new_content;
 				}
-
-				// size_t str_size = array.content + i - str_view;
-				uint32_t hash = fnv1a_32(view.content, view.count);
-
-				uint32_t index = hash % table.capacity;
-
-				// printf("%.*s => %u\n", (int)(view.count), view.content, index);
-
 				//
-				// If the key does not exist, add it to
-				// the table and move on
+				// Insert the new value into the table if it
+				// does not already exist.
 				//
-				if (table.content[index].key.content == NULL) {
-					table.count++;
-					table.content[index].key = view;
-					table.content[index].value = 1;
-					printf("Inserted!\n");
+				keyval_t bucket = {view, 1};
+				table_insert(&table, bucket);
 				//
-				// Otherwise, either the key is a duplicate
-				// or the hash has collided. Report this.
+				// Reset the view
 				//
-				} else {
-					if (view_comp(table.content[index].key, view))
-						printf("The value \"%.*s\" was already in the table [%.*s].\n", (int)(view.count), view.content, (int)(table.content[index].key.count), table.content[index].key.content);
-					else
-						printf("The hash collided!\n");
-				}
-				
 				view.count = 0;
+				view.content = NULL;
 				break;
 			//
-			// Letters
+			// Non white space characters
 			//
 			default:
 				if (view.count == 0)
@@ -288,12 +351,11 @@ int main(void) {
 				view.count++;
 				break;
 		}
-		
-			
 	}
-
+	//
+	// Cleanup
+	//
 	free(array.content);
 	free(table.content);
-
 	return 0;
 }
