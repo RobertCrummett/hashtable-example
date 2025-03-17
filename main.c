@@ -167,10 +167,11 @@ int main(void) {
 	// Display dynamic array contents as single words
 	//
 	view_t view = {0};
-
+	
+	const size_t table_default_size = 256;
 	table_t table = {
 		.count = 0,
-		.capacity = 256,
+		.capacity = table_default_size,
 		.content = NULL
 	};
 
@@ -180,6 +181,9 @@ int main(void) {
 		free(array.content);
 		return 1;
 	}
+
+	const double table_load_factor = 0.75;
+	const size_t table_scale_factor = 2;
 
 	for (size_t i = 0; i < array.count; i++) {
 		char c = array.content[i];
@@ -198,9 +202,54 @@ int main(void) {
 				if (view.count == 0)
 					break;
 				//
-				// Otherwise, hash the string
-				// and reset the view.
+				// Otherwise, put the view into the table
 				//
+
+				//
+				// If the tables current load factor is
+				// greater than some threshold `table_load_factor`,
+				// the table needs to be reallocated and rehashed
+				// before the enxt insertion.
+				//
+				printf("Table Load Factor: %lf\n", ((double)table.count) / table.capacity);
+				if (table_load_factor < ((double)table.count) / table.capacity) {
+					size_t new_capacity = table_scale_factor * table.capacity;
+					keyval_t *new_content = calloc(new_capacity, sizeof *new_content);
+					if (new_content == NULL) {
+						fprintf(stderr, "Failed to allocate new space during the table rehashing\n");
+						free(array.content);
+						free(table.content);
+						return 1;
+					}
+
+					//
+					// Linearly step through table and rehash each
+					// key value pair. Then place the rehashed key
+					// value pair into the new table space.
+					//
+					for (size_t j = 0; j < table.capacity; j++) {
+						keyval_t bucket = table.content[j];
+						//
+						// Test if the key exists
+						//
+						if (bucket.key.content != NULL) {
+							uint32_t hash = fnv1a_32(bucket.key.content, bucket.key.count);
+							uint32_t index = hash % new_capacity;
+
+							new_content[index] = bucket;
+						}
+					}
+
+					//
+					// Remove the old table contents and replace
+					// the with the rehashed, expanded contents
+					//
+					free(table.content);
+
+					table.capacity = new_capacity;
+					table.content = new_content;
+				}
+
 				// size_t str_size = array.content + i - str_view;
 				uint32_t hash = fnv1a_32(view.content, view.count);
 
